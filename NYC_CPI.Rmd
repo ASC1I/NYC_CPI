@@ -1,0 +1,303 @@
+---
+title: "Project 2"
+author: "Michael Lee"
+date: "December 19, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#setup
+We clean the data and import the necessary packages below. The data we use is the Monthly Price Index from 2012-2018  
+https://data.bls.gov/cgi-bin/surveymost
+```{r}
+library(readxl)
+library(ggplot2)
+library(e1071)
+library(goftest)
+library(tseries)
+library(forecast)
+
+importRaw <- read_excel("C:/Users/micha/OneDrive/Documents/2018-2019/Time Series/Import.xlsx")
+
+#trims the raw data for use
+importRaw <- importRaw[11:length(importRaw$X__1),]
+importRaw$`Import/Export Price Indexes` <- NULL
+
+#this loop converts the CPI prices into a single variable
+index <- c()
+for(i in c(1:length(importRaw$X__1))){
+  a <- as.numeric(importRaw[i,])
+  a <- a[-1]
+  index <- append(index, a)
+}
+import <- data.frame(index)
+import <- na.omit(import)
+
+#creates a time variable representative of each month 
+import$time <- c(1:length(import$index))
+import <- import[import$time >35,]
+import$time <- c(1:length(import$index))
+import <- import[,c(2,1)]
+
+```
+
+
+#Initial Analysis
+
+The initial plot shows us that there is level dependent volatility. 
+```{r}
+ggplot(import, aes(x = time, y = index)) +
+  geom_line(color = "#00AFBB", size = 1) +
+  labs(x="Time", y="Index", title="Import Price Index") +
+  theme_bw()
+```
+
+We take the logs of our data and save the last observation (log85) to evaluate our intervals later.  
+The ACF and PACF indicate we should difference our data. 
+```{r}
+import$logIndex <- log(import$index)
+log85 <- import$logIndex[85]
+import <- import[-c(length(import$time)),]
+import$logDiff <- c(NA,diff(import$logIndex))
+```
+
+```{r}
+ggplot(import, aes(x = time, y = logIndex)) +
+  geom_line(color = "#00AFBB", size = 1) +
+  labs(x="Time", y="Index", title="Log of Index") +
+  theme_bw()
+```
+
+```{r}
+acf(import$logIndex)
+```
+
+
+
+```{r}
+pacf(import$logIndex)
+```
+
+
+
+```{r}
+ggplot(import, aes(x = time, y = logDiff)) +
+  geom_line(color = "#00AFBB", size = 1) +
+  labs(x="Time", y="Index", title="Log Difference of Index") +
+  theme_bw()
+```
+
+```{r}
+acf(na.omit(import$logDiff))
+```
+
+```{r}
+pacf(na.omit(import$logDiff))
+```
+
+#Selecting a Model
+
+Below we examine the AICC for various ARIMA models using d = 1. AICC suggests a ARIMA(0,1,2) model
+```{r}
+#with constants
+indexTS <- ts(import$logIndex, start = 1, end = length(import$logIndex))
+
+x <- c(0,1,2,3)
+z <- c(0,1,2,3)
+#with constants
+results <- c()
+pdq <- c()
+for(i in x){
+  for(j in z){
+    model <- Arima(indexTS, c(i,1,j), include.constant = TRUE)
+    results <- c(results, model$aic)
+    pdq <-c(pdq, paste(i,"1",j, sep= " "))
+  }
+}
+AIC1 <- data.frame(pdq, results)
+print(AIC1)
+```
+
+```{r}
+#without constants
+results <- c()
+pdq <- c()
+for(i in x){
+  for(j in z){
+    model <- Arima(indexTS, c(i,1,j), include.constant = FALSE)
+    results <- c(results, model$aic)
+    pdq <-c(pdq, paste(i,"1",j, sep= " "))
+  }
+}
+AIC2 <- data.frame(pdq, results)
+print(AIC2)
+#ARIMA(0,1,2)
+```
+
+
+```{r}
+arimaModel <- Arima(indexTS,c(0,1,2),include.constant = FALSE)
+arimaModel
+```
+
+The Model is:
+$$
+\ X_{t} = \epsilon_t - .6192\epsilon_{t-1} - .1043\epsilon_{t-2} 
+$$
+
+
+Our forecast for the one step ahead interval does not include our actual data point, 4.8378 meaning our intervals are not wide enough. 
+```{r}
+forecast <- forecast(arimaModel, h = 1, level = 95)
+forecastData<- data.frame(forecast)
+forecastData
+
+```
+
+
+#Residuals
+
+The plots below show that the residuals are not normally distributed and there is statistically significant autocorrelation   
+of the squared residuals. This means our data has conditional heteroskedasticity and an ARCH model is appropriate.s
+
+
+
+plot of residuals
+```{r}
+import$resids <- arimaModel$residuals
+import$residsSQR <- (import$resids)^2
+
+plot(import$resids)
+```
+
+plot of residuals squared
+```{r}
+plot(import$residsSQR)
+```
+
+acf of residsuals
+```{r}
+acf(import$resids)
+```
+
+pacf of residuals
+```{r}
+pacf(import$resids)
+```
+
+acf of residuals squared
+```{r}
+acf(import$residsSQR)
+```
+
+pacf of residuals squared
+```{r}
+pacf(import$residsSQR)
+```
+
+#ARCH Model
+Judging from the tables bleow, the GARCH(1,1) has the best AICC so we will select this model.  
+
+AICC and log liklihood for the ARCH(q) Models
+```{r}
+
+loglik <- c()
+N <- length(import$resids)
+for(i in 0:10){
+  if(i==0){
+    loglik <- c(loglik,-0.5 * N * (1 + log(2 * pi * mean(import$resids^2))))
+  }
+  else{
+    fit <- garch(import$resids, c(0,i), trace=FALSE)
+    loglik <- c(loglik, logLik(fit))
+  }
+}
+
+q <- 0
+AICC3 <- c()
+for(i in loglik){
+  k <- q + 1
+  AICC3 <- c(AICC3, (-2 * loglik[q+1]  + 2 * k * N / (N - k - 1)))
+  q <- q+1
+}
+q <- c(0:10)
+selection <- data.frame(q, loglik, AICC3)
+selection
+```
+
+AICC and Log Liklihood for the GARCH(1,1) Model
+
+```{r}
+fit <- garch(import$resids, c(1,1), trace=FALSE)
+loglik <- logLik(fit)
+k <- 2
+aicc <- -2 * loglik  + 2 * k * N / (N - k - 1)
+print(data.frame(loglik, aicc))
+```
+
+
+```{r}
+summary(fit)
+```
+
+The Model is:
+
+$$
+\sigma^{2}_{t} = 2.46\times10^{-5}+0.3024\epsilon_{t-1}^{2} + 0.2519\sigma_{t-1}^{2}
+$$
+
+unconditional variance
+```{r}
+uv <- (2.460 * 10^(-05))/(1-.3024-.252)
+uv
+```
+
+#Forecast Intervals
+
+This shows the lower and upper bound of our forecast. They seem to be higher than our intervals from the Arima Model.
+```{r}
+f1 <- fitted.values(arimaModel)
+h1 <- fit$fit[,1]^2
+lower <- f1 + -1.96 * sqrt(h1)
+upper <- f1 + 1.96 * sqrt(h1)
+data.frame(lower,upper)
+
+```
+
+
+This plot shows that there are high bursts of volatility. 
+```{r}
+tail(h1,n=10)
+plot(import$time, h1, type="l", col=4)
+```
+
+The forecast intervals we generated follow the data well. 
+```{r}
+ggplot() +
+  geom_line(aes(import$time, import$logIndex)) +
+  geom_line(aes(import$time, f1 + 1.96*sqrt(h1), col = "High 95%")) +
+  geom_line(aes(import$time, f1 - 1.96*sqrt(h1), col = "Low 95%")) +
+  labs(x = "Months", y = "Logged Rupee") +
+  theme_bw()
+
+```
+
+
+
+#Arch Residuals
+
+The probability plot shows that our ARCH Residuals are approximatly normal. 
+```{r}
+
+archResid <- import$resids / sqrt(h1)
+probplot(archResid)
+```
+
+This shows that our forecast intervals failed 3.57% of the time
+```{r}
+failed <- sum(abs(import$logIndex - f1) > sqrt(h1) * 1.96, na.rm=TRUE)/nrow(import)
+failed
+```
